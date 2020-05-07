@@ -26,8 +26,8 @@ from transformers import (WEIGHTS_NAME, BertConfig, BertTokenizer)
 
 from transformers import AdamW, get_linear_schedule_with_warmup
 
-from utils import (SEMEVAL_RELATION_LABELS, TACRED_RELATION_LABELS, compute_metrics, 
-    convert_examples_to_features, output_modes, data_processors)
+from utils import (SEMEVAL_RELATION_LABELS, TACRED_RELATION_LABELS, compute_metrics,
+                   convert_examples_to_features, output_modes, data_processors)
 import torch.nn.functional as F
 
 from argparse import ArgumentParser
@@ -45,10 +45,10 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def train(config, train_dataset, model, tokenizer):
+def train(config, train_dataset, model, tokenizer, label2id):
     """ Train the model """
     config.train_batch_size = config.per_gpu_train_batch_size * \
-        max(1, config.n_gpu)
+                              max(1, config.n_gpu)
     if config.local_rank == -1:
         train_sampler = RandomSampler(train_dataset)
     else:
@@ -60,7 +60,7 @@ def train(config, train_dataset, model, tokenizer):
     if config.max_steps > 0:
         t_total = config.max_steps
         config.num_train_epochs = config.max_steps // (
-            len(train_dataloader) // config.gradient_accumulation_steps) + 1
+                len(train_dataloader) // config.gradient_accumulation_steps) + 1
     else:
         t_total = len(
             train_dataloader) // config.gradient_accumulation_steps * config.num_train_epochs
@@ -112,11 +112,11 @@ def train(config, train_dataset, model, tokenizer):
         for step, batch in enumerate(epoch_iterator):
             model.train()
             batch = tuple(t.to(config.device) for t in batch)
-            inputs = {'input_ids':      batch[0],
+            inputs = {'input_ids': batch[0],
                       'attention_mask': batch[1],
                       # XLM and RoBERTa don't use segment_ids
                       'token_type_ids': batch[2],
-                      'labels':      batch[3],
+                      'labels': batch[3],
                       'e1_mask': batch[4],
                       'e2_mask': batch[5],
                       }
@@ -141,11 +141,12 @@ def train(config, train_dataset, model, tokenizer):
                 model.zero_grad()
                 global_step += 1
 
-                if config.local_rank in [-1, 0] and config.logging_steps > 0 and global_step % config.logging_steps == 0:
+                if config.local_rank in [-1,
+                                         0] and config.logging_steps > 0 and global_step % config.logging_steps == 0:
                     # Log metrics
                     # Only evaluate when single GPU otherwise metrics may not average well
                     if config.local_rank == -1 and config.evaluate_during_training:
-                        results = evaluate(config, model, tokenizer)
+                        results = evaluate(config, model, tokenizer, label2id)
                     logging_loss = tr_loss
                 if config.local_rank in [-1, 0] and config.save_steps > 0 and global_step % config.save_steps == 0:
                     # Save model checkpoint
@@ -170,20 +171,20 @@ def train(config, train_dataset, model, tokenizer):
     return global_step, tr_loss / global_step
 
 
-def evaluate(config, model, tokenizer, prefix=""):
+def evaluate(config, model, tokenizer, label2id, prefix="", test=False):
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_task = config.task_name
     eval_output_dir = config.output_dir
 
     results = {}
     eval_dataset = load_and_cache_examples(
-        config, eval_task, tokenizer, evaluate=True)
+        config, eval_task, tokenizer, label2id, evaluate=True, test=test)
 
     if not os.path.exists(eval_output_dir) and config.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir)
 
     config.eval_batch_size = config.per_gpu_eval_batch_size * \
-        max(1, config.n_gpu)
+                             max(1, config.n_gpu)
     # Note that DistributedSampler samples randomly
     eval_sampler = SequentialSampler(
         eval_dataset) if config.local_rank == -1 else DistributedSampler(eval_dataset)
@@ -203,11 +204,11 @@ def evaluate(config, model, tokenizer, prefix=""):
         batch = tuple(t.to(config.device) for t in batch)
 
         with torch.no_grad():
-            inputs = {'input_ids':      batch[0],
+            inputs = {'input_ids': batch[0],
                       'attention_mask': batch[1],
                       # XLM and RoBERTa don't use segment_ids
                       'token_type_ids': batch[2],
-                      'labels':      batch[3],
+                      'labels': batch[3],
                       'e1_mask': batch[4],
                       'e2_mask': batch[5],
                       }
@@ -231,15 +232,15 @@ def evaluate(config, model, tokenizer, prefix=""):
     logger.info("***** Eval results {} *****".format(prefix))
     for key in sorted(result.keys()):
         logger.info(f"{key} = {result[key]}")
-    
+
     if config.task_name == "semeval":
         output_eval_file = "eval/sem_res.txt"
         with open(output_eval_file, "w") as writer:
             for key in range(len(preds)):
                 writer.write("%d\t%s\n" %
-                             (key+8001, str(SEMEVAL_RELATION_LABELS[preds[key]])))
+                             (key + 8001, str(SEMEVAL_RELATION_LABELS[preds[key]])))
     elif config.task_name == "tacred":
-        output_eval_file = "eval/tac_res.txt"
+        output_eval_file = "eval/tac_res_{}.txt".format('test' if test else 'dev')
         with open(output_eval_file, "w") as writer:
             for pred in preds:
                 writer.write(TACRED_RELATION_LABELS[pred])
@@ -247,7 +248,7 @@ def evaluate(config, model, tokenizer, prefix=""):
     return result
 
 
-def load_and_cache_examples(config, task, tokenizer, evaluate=False, test=False):
+def load_and_cache_examples(config, task, tokenizer, label2id, evaluate=False, test=False):
     if config.local_rank not in [-1, 0] and not evaluate:
         # Make sure only the first process in distributed training process the dataset, and the others will use the cache
         torch.distributed.barrier()
@@ -268,11 +269,12 @@ def load_and_cache_examples(config, task, tokenizer, evaluate=False, test=False)
     else:
         logger.info("Creating features from dataset file at %s",
                     config.data_dir)
-        label_list = processor.get_labels()
-        examples = processor.get_dev_examples(
-            config.data_dir) if evaluate else processor.get_train_examples(config.data_dir)
+        label_list = processor.get_labels(config.data_dir)
+        examples = (processor.get_test_examples(config.data_dir) if test else processor.get_dev_examples(
+            config.data_dir)) if evaluate else processor.get_train_examples(config.data_dir)
         features = convert_examples_to_features(
-            examples, label_list, config.max_seq_len, tokenizer, "classification", use_entity_indicator=config.use_entity_indicator)
+            examples, label_list, config.max_seq_len, tokenizer, "classification",
+            use_entity_indicator=config.use_entity_indicator)
         if config.local_rank in [-1, 0]:
             logger.info(f"Saving features into cached file {cached_features_file}")
             torch.save(features, cached_features_file)
@@ -293,7 +295,7 @@ def load_and_cache_examples(config, task, tokenizer, evaluate=False, test=False)
         [f.e2_mask for f in features], dtype=torch.long)  # add e2 mask
     if output_mode == "classification":
         all_label_ids = torch.tensor(
-            [f.label_id for f in features], dtype=torch.long)
+            [label2id[f.label_id] for f in features], dtype=torch.long)
     elif output_mode == "regression":
         all_label_ids = torch.tensor(
             [f.label_id for f in features], dtype=torch.float)
@@ -309,9 +311,11 @@ def main():
     args = parser.parse_args()
     config = Config(args.config)
 
-    if os.path.exists(config.output_dir) and os.listdir(config.output_dir) and config.train and not config.overwrite_output_dir:
+    if os.path.exists(config.output_dir) and os.listdir(
+            config.output_dir) and config.train and not config.overwrite_output_dir:
         raise ValueError(
-            "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(config.output_dir))
+            "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(
+                config.output_dir))
 
     # Setup CUDA, GPU & distributed training
     if config.local_rank == -1 or config.no_cuda:
@@ -339,7 +343,9 @@ def main():
 
     # Prepare task -- SemEval or TACRED
     processor = data_processors[config.task_name]()
-    label_list = processor.get_labels()
+    label_list = processor.get_labels(config.data_dir)
+    label2id = {label: i for i, label in enumerate(label_list)}
+    id2label = {i: label for i, label in enumerate(label_list)}
     num_labels = len(label_list)
 
     # Load pretrained model and tokenizer
@@ -350,9 +356,12 @@ def main():
         config.pretrained_model_name, num_labels=num_labels, finetuning_task=config.task_name)
     do_lower_case = "-uncased" in config.pretrained_model_name
     tokenizer = BertTokenizer.from_pretrained(
-        config.pretrained_model_name, do_lower_case=do_lower_case, additional_special_tokens=additional_special_tokens)    
+        config.pretrained_model_name, do_lower_case=do_lower_case, additional_special_tokens=additional_special_tokens)
+    tokenizer.add_special_tokens({'additional_special_tokens': [token.lower() for token in
+                                                                additional_special_tokens] if do_lower_case else additional_special_tokens})
     model = BertForSequenceClassification.from_pretrained(
         config.pretrained_model_name, config=bertconfig)
+    model.resize_token_embeddings(len(tokenizer))
 
     if config.local_rank == 0:
         # Make sure only the first process in distributed training will download model & vocab
@@ -365,8 +374,8 @@ def main():
     # Training
     if config.train:
         train_dataset = load_and_cache_examples(
-            config, config.task_name, tokenizer, evaluate=False)
-        global_step, tr_loss = train(config, train_dataset, model, tokenizer)
+            config, config.task_name, tokenizer, label2id, evaluate=False)
+        global_step, tr_loss = train(config, train_dataset, model, tokenizer, label2id)
         logger.info(" global_step = %s, average loss = %s",
                     global_step, tr_loss)
 
@@ -399,6 +408,9 @@ def main():
     if config.eval and config.local_rank in [-1, 0]:
         tokenizer = BertTokenizer.from_pretrained(
             config.output_dir, do_lower_case=do_lower_case, additional_special_tokens=additional_special_tokens)
+        tokenizer.add_special_tokens({'additional_special_tokens':
+                                          [token.lower() for token in
+                                           additional_special_tokens] if do_lower_case else additional_special_tokens})
         checkpoints = [config.output_dir]
         if config.eval_all_checkpoints:
             checkpoints = list(os.path.dirname(c) for c in sorted(
@@ -411,10 +423,15 @@ def main():
                 '-')[-1] if len(checkpoints) > 1 else ""
             model = BertForSequenceClassification.from_pretrained(checkpoint)
             model.to(config.device)
-            result = evaluate(config, model, tokenizer, prefix=global_step)
+            result = evaluate(config, model, tokenizer, label2id, prefix=global_step, test=False)
             result = dict((k + '_{}'.format(global_step), v)
                           for k, v in result.items())
             results.update(result)
+            if config.test:
+                result = evaluate(config, model, tokenizer, label2id, prefix=global_step, test=True)
+                result = dict((k + '_{}'.format(global_step), v)
+                              for k, v in result.items())
+                results.update(result)
 
     return results
 

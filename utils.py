@@ -19,13 +19,14 @@
 
 from __future__ import absolute_import, division, print_function
 
-import csv
+import csv, json
 import re
 import logging
 import os
 import sys
 from io import open
 import math
+from collections import Counter
 
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import matthews_corrcoef, f1_score
@@ -56,6 +57,20 @@ TACRED_RELATION_LABELS = ['org:founded_by', 'no_relation', 'per:employee_of', 'o
     'org:founded', 'per:country_of_birth', 'per:date_of_birth', 'per:city_of_birth', 'per:charges', 
     'per:country_of_death']
 
+CONVERT_PARENTHESES = [(re.compile(r'-LRB-', re.UNICODE), '('),
+ (re.compile(r'-RRB-', re.UNICODE), ')'),
+ (re.compile(r'-LSB-', re.UNICODE), '['),
+ (re.compile(r'-RSB-', re.UNICODE), ']'),
+ (re.compile(r'-LCB-', re.UNICODE), '{'),
+ (re.compile(r'-RCB-', re.UNICODE), '}')]
+
+
+def convert_parentheses(text):
+    if text:
+        for regexp, substitution in CONVERT_PARENTHESES:
+            text = regexp.sub(substitution, text)
+    return text
+
 
 class InputExample(object):
     """A single training/test example for simple sequence classification."""
@@ -73,8 +88,8 @@ class InputExample(object):
             specified for train and dev examples, but not for test examples.
         """
         self.guid = guid
-        self.text_a = text_a
-        self.text_b = text_b
+        self.text_a = convert_parentheses(text_a)
+        self.text_b = convert_parentheses(text_b)
         self.label = label
 
 
@@ -111,7 +126,7 @@ class DataProcessor(object):
         """Gets a collection of `InputExample`s for the dev set."""
         raise NotImplementedError()
 
-    def get_labels(self):
+    def get_labels(self, data_dir):
         """Gets the list of labels for this data set."""
         raise NotImplementedError()
 
@@ -166,36 +181,87 @@ class SemEvalProcessor(DataProcessor):
 class TacredProcessor(DataProcessor):
     """Processor for the TACRED data set. """
 
+    @classmethod
+    def _read_json(cls, input_file):
+        with open(input_file, "r", encoding='utf-8') as reader:
+            data = json.load(reader)
+        return data
+
     def get_train_examples(self, data_dir):
         """See base class."""
-        logger.info("LOOKING AT {}".format(
-            os.path.join(data_dir, "train.tsv")))
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
+            self._read_json(os.path.join(data_dir, "train.json")), "train")
 
     def get_dev_examples(self, data_dir):
         """See base class."""
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
+            self._read_json(os.path.join(data_dir, "dev.json")), "dev")
 
-    def get_labels(self):
+    def get_test_examples(self, data_dir):
         """See base class."""
-        return [str(i) for i in range(42)]
+        return self._create_examples(
+            self._read_json(os.path.join(data_dir, "test.json")), "test")
 
-    def _create_examples(self, lines, set_type):
+    def get_labels(self, data_dir):
+        """See base class."""
+        dataset = self._read_json(os.path.join(data_dir, "train.json"))
+        # dataset += self._read_json(os.path.join(data_dir, "dev.json"))
+        # dataset += self._read_json(os.path.join(data_dir, "test.json"))
+        count = Counter()
+        for example in dataset:
+            count[example['relation']] += 1
+        logger.info("%d labels" % len(count))
+        # Make sure the negative label is alwyas 0
+        labels = ["no_relation"]
+        for label, count in count.most_common():
+            logger.info("%s: %.2f%%" % (label, count * 100.0 / len(dataset)))
+            if label not in labels:
+                labels.append(label)
+        return labels
+
+    def _create_examples(self, dataset, set_type):
         """Creates examples for the training and dev sets.
         e.g.,: 
         2   the [E11] author [E12] of a keygen uses a [E21] disassembler [E22] to look at the raw assembly code .   6
         """
         examples = []
-        for (i, line) in enumerate(lines):
-            guid = "%s-%s" % (set_type, i)
-            text_a = line[1]
+        for example in dataset:
+            self.insert_entity_indicators(example)
+            guid = example['id']
+            text_a = ' '.join(example['token'])
             text_b = None
-            label = line[2]
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+            label = example['relation']
+            examples.append(InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
         return examples
+
+    @classmethod
+    def insert_entity_indicators(cls, example):
+        e1_start = example['subj_start'] if example['subj_start'] < example['obj_start'] else example['obj_start']
+        e1_end = example['subj_end'] if example['subj_start'] < example['obj_start'] else example['obj_end']
+        e2_start = example['subj_start'] if example['subj_start'] > example['obj_start'] else example['obj_start']
+        e2_end = example['subj_end'] if example['subj_start'] > example['obj_start'] else example['obj_end']
+        example['token'].insert(e1_start, '[E11]')
+        example['token'].insert(e1_end + 2, '[E12]')
+        example['token'].insert(e2_start + 2, '[E21]')
+        example['token'].insert(e2_end + 4, '[E22]')
+
+    # def _create_examples(self, dataset, set_type):
+    #     """Creates examples for the training and dev sets."""
+    #     examples = []
+    #     for example in dataset:
+    #         sentence = [convert_token(token) for token in example['token']]
+    #         assert example['subj_start'] >= 0 and example['subj_start'] <= example['subj_end'] \
+    #             and example['subj_end'] < len(sentence)
+    #         assert example['obj_start'] >= 0 and example['obj_start'] <= example['obj_end'] \
+    #             and example['obj_end'] < len(sentence)
+    #         examples.append(InputExample(guid=example['id'],
+    #                          sentence=sentence,
+    #                          span1=(example['subj_start'], example['subj_end']),
+    #                          span2=(example['obj_start'], example['obj_end']),
+    #                          ner1=example['subj_type'],
+    #                          ner2=example['obj_type'],
+    #                          label=example['relation']))
+    #     return examples
 
 
 def convert_examples_to_features(examples, label_list, max_seq_len,
@@ -270,14 +336,14 @@ def convert_examples_to_features(examples, label_list, max_seq_len,
 
         # entity mask
         if use_entity_indicator:
-            if "[E22]" not in tokens or "[E12]" not in tokens:  # remove this sentence because after max length truncation, the one entity boundary is broken
+            if "[E22]".lower() not in tokens or "[E12]".lower() not in tokens:  # remove this sentence because after max length truncation, the one entity boundary is broken
                 logger.warning(f"*** Example-{ex_index} is skipped ***")
                 continue 
             else:
-                e11_p = tokens.index("[E11]")+1
-                e12_p = tokens.index("[E12]")
-                e21_p = tokens.index("[E21]")+1
-                e22_p = tokens.index("[E22]")
+                e11_p = tokens.index("[E11]".lower())+1
+                e12_p = tokens.index("[E12]".lower())
+                e21_p = tokens.index("[E21]".lower())+1
+                e22_p = tokens.index("[E22]".lower())
 
         # The mask has 1 for real tokens and 0 for padding tokens. Only real
         # tokens are attended to.
@@ -304,7 +370,7 @@ def convert_examples_to_features(examples, label_list, max_seq_len,
 
         if output_mode == "classification":
             # label_id = label_map[example.label]
-            label_id = int(example.label)
+            label_id = example.label
         elif output_mode == "regression":
             label_id = float(example.label)
         else:
@@ -330,7 +396,7 @@ def convert_examples_to_features(examples, label_list, max_seq_len,
                             " ".join([str(x) for x in e2_mask]))
             logger.info("segment_ids: %s" %
                         " ".join([str(x) for x in segment_ids]))
-            logger.info("label: %s (id = %d)" % (example.label, label_id))
+            logger.info("label: %s (id = %s)" % (example.label, label_list.index(label_id)))
 
         features.append(
             InputFeatures(input_ids=input_ids,
@@ -366,13 +432,13 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
 def _truncate_seq(tokens_a, max_length):
     """Truncates a sequence """
     tmp = tokens_a[:max_length]
-    if ("[E12]" in tmp) and ("[E22]" in tmp):
+    if ("[E12]".lower() in tmp) and ("[E22]".lower() in tmp):
         return tmp
     else:
-        e11_p = tokens_a.index("[E11]")
-        e12_p = tokens_a.index("[E12]")
-        e21_p = tokens_a.index("[E21]")
-        e22_p = tokens_a.index("[E22]")
+        e11_p = tokens_a.index("[E11]".lower())
+        e12_p = tokens_a.index("[E12]".lower())
+        e21_p = tokens_a.index("[E21]".lower())
+        e22_p = tokens_a.index("[E22]".lower())
         start = min(e11_p, e12_p, e21_p, e22_p)
         end = max(e11_p, e12_p, e21_p, e22_p)
         if end-start > max_length:
