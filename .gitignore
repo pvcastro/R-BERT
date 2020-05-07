@@ -127,3 +127,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+/.idea/
+/eval/tac_res.txt
+/eval/tac_res_dev.txt
+/eval/tac_res_test.txt
+/output/
